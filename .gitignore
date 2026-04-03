@@ -1,0 +1,19 @@
+# Arquivos de configuração VPN (nunca commitar)
+*.ovpn
+.credentials
+*.key
+*.crt
+*.pem
+
+# Scripts gerados localmente (contêm referências ao ambiente do usuário)
+vpn-connect.sh
+vpn-disconnect.sh
+
+# Diretório de credenciais
+.config/
+
+# Sistema
+.DS_Store
+*.swp
+*.swo
+*~
