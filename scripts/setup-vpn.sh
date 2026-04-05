@@ -9,7 +9,6 @@ CREDENTIALS_FILE="$CREDENTIALS_DIR/.credentials"
 
 # -----------------------------------------------------------------------------
 # PASSO 0: Coletar senha sudo via terminal ANTES de qualquer coisa
-# (zenity ainda pode não estar instalado)
 # -----------------------------------------------------------------------------
 echo "========================================"
 echo "   VPN Sophos - Setup"
@@ -18,7 +17,6 @@ echo ""
 read -sp "Senha sudo: " SUDO_PASS; echo
 echo ""
 
-# Valida a senha sudo imediatamente
 if ! echo "$SUDO_PASS" | sudo -S true 2>/dev/null; then
   echo "❌ Senha sudo incorreta. Abortando."
   exit 1
@@ -50,7 +48,7 @@ echo ""
 # Tela de boas-vindas
 zenity --info \
   --title="VPN Sophos - Setup" \
-  --text="Bem-vindo ao setup da VPN Sophos!\n\nVocê precisará de:\n\n• Usuário e senha VPN\n• Chave TOTP BASE32\n  (portal Sophos → OTP tokens)\n• Arquivo .ovpn" \
+  --text="Bem-vindo ao setup da VPN Sophos!\n\nVocê precisará de:\n\n• Usuário e senha VPN\n• Arquivo .ovpn\n• Chave TOTP BASE32 (opcional)\n  (portal Sophos → OTP tokens)" \
   --width=420 \
   --ok-label="Começar"
 
@@ -70,12 +68,25 @@ VPN_PASS=$(zenity --password \
   --text="Senha VPN:")
 [ -z "$VPN_PASS" ] && zenity --error --text="Senha não informada. Abortando." && exit 1
 
-# Chave TOTP
-TOTP_SECRET=$(zenity --entry \
+# Chave TOTP — opcional
+zenity --question \
   --title="VPN Sophos - Setup (3/4)" \
-  --text="Chave TOTP BASE32:\n(Portal Sophos → OTP tokens)" \
-  --width=420)
-[ -z "$TOTP_SECRET" ] && zenity --error --text="Chave TOTP não informada. Abortando." && exit 1
+  --text="Deseja configurar o código 2FA automático?\n\nSe sim, o código OTP será gerado automaticamente\na cada conexão usando sua chave TOTP BASE32.\n\nSe não, o código será solicitado manualmente\ncada vez que você conectar." \
+  --width=420 \
+  --ok-label="Sim, configurar automático" \
+  --cancel-label="Não, digitar manualmente"
+
+TOTP_MODE=$?  # 0 = automático, 1 = manual
+
+if [ $TOTP_MODE -eq 0 ]; then
+  TOTP_SECRET=$(zenity --entry \
+    --title="VPN Sophos - Setup (3/4)" \
+    --text="Chave TOTP BASE32:\n(Portal Sophos → OTP tokens)" \
+    --width=420)
+  [ -z "$TOTP_SECRET" ] && zenity --error --text="Chave TOTP não informada. Abortando." && exit 1
+else
+  TOTP_SECRET=""
+fi
 
 # Arquivo .ovpn
 OVPN_DEFAULT=$(ls ~/*.ovpn 2>/dev/null | head -1)
@@ -139,46 +150,58 @@ fi
   chmod 600 "$CREDENTIALS_FILE"
 
   echo "50"; echo "# Criando script de conexão..."
-  cat > ~/vpn-connect.sh << 'ENDOFSCRIPT'
-#!/bin/bash
-CREDENTIALS_FILE="$HOME/.config/vpn-sophos/.credentials"
 
-if [ ! -f "$CREDENTIALS_FILE" ]; then
+  # Bloco OTP: automático ou manual, dependendo do modo escolhido
+  if [ $TOTP_MODE -eq 0 ]; then
+    OTP_BLOCK='OTP=$(oathtool --totp --base32 "$TOTP_SECRET")'
+  else
+    OTP_BLOCK='OTP=$(zenity --entry \
+  --title="VPN - Código 2FA" \
+  --text="Digite o código OTP do Sophos:" \
+  --width=320)
+[ -z "$OTP" ] && notify-send "VPN" "Código OTP não informado. Abortando." --icon=network-error && exit 1'
+  fi
+
+  cat > ~/vpn-connect.sh << ENDOFSCRIPT
+#!/bin/bash
+CREDENTIALS_FILE="\$HOME/.config/vpn-sophos/.credentials"
+
+if [ ! -f "\$CREDENTIALS_FILE" ]; then
   notify-send "VPN" "Credenciais não encontradas. Rode o setup novamente." --icon=network-error
   exit 1
 fi
 
-source "$CREDENTIALS_FILE"
+source "\$CREDENTIALS_FILE"
 
-echo "$SUDO_PASS" | sudo -S killall -9 openvpn 2>/dev/null
+echo "\$SUDO_PASS" | sudo -S killall -9 openvpn 2>/dev/null
 
-OTP=$(oathtool --totp --base32 "$TOTP_SECRET")
+$OTP_BLOCK
 
-TMPFILE=$(mktemp)
-chmod 600 "$TMPFILE"
-echo "$VPN_USER" > "$TMPFILE"
-echo "${VPN_PASS}${OTP}" >> "$TMPFILE"
+TMPFILE=\$(mktemp)
+chmod 600 "\$TMPFILE"
+echo "\$VPN_USER" > "\$TMPFILE"
+echo "\${VPN_PASS}\${OTP}" >> "\$TMPFILE"
 
-echo "$SUDO_PASS" | sudo -S openvpn --daemon \
-  --config "$OVPN_FILE" \
-  --auth-user-pass "$TMPFILE" \
+echo "\$SUDO_PASS" | sudo -S openvpn --daemon \\
+  --config "\$OVPN_FILE" \\
+  --auth-user-pass "\$TMPFILE" \\
   --auth-nocache
 
 for i in {1..10}; do
   sleep 1
   if ip addr show tun0 &>/dev/null; then
-    rm -f "$TMPFILE"
+    rm -f "\$TMPFILE"
     notify-send "VPN" "Conectado com sucesso!" --icon=network-vpn
     sleep 2
-    kill $(ps -o ppid= -p $$)
+    kill \$(ps -o ppid= -p \$\$)
     exit 0
   fi
 done
 
-rm -f "$TMPFILE"
+rm -f "\$TMPFILE"
 notify-send "VPN" "Falha ao conectar. Verifique as credenciais." --icon=network-error
 sleep 3
-kill $(ps -o ppid= -p $$)
+kill \$(ps -o ppid= -p \$\$)
 ENDOFSCRIPT
 
   echo "65"; echo "# Criando script de desconexão..."
@@ -252,8 +275,14 @@ DESKEOF
   --auto-close \
   --width=420
 
-# Tela de conclusão
+# Modo escolhido
+if [ $TOTP_MODE -eq 0 ]; then
+  OTP_INFO="Modo: OTP automatico"
+else
+  OTP_INFO="Modo: OTP manual (solicitado ao conectar)"
+fi
+
 zenity --info \
   --title="VPN Sophos - Pronto!" \
-  --text="Setup concluido!\n\nAtalhos no menu de aplicativos:\n  VPN Conectar\n  VPN Desconectar\n\nOu no terminal:\n  vpn-on     → conectar\n  vpn-off    → desconectar\n  vpn-status → verificar status" \
+  --text="Setup concluido!\n\n$OTP_INFO\n\nAtalhos no menu de aplicativos:\n  VPN Conectar\n  VPN Desconectar\n\nOu no terminal:\n  vpn-on     → conectar\n  vpn-off    → desconectar\n  vpn-status → verificar status" \
   --width=420

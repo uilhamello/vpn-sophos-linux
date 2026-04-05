@@ -44,8 +44,7 @@ Antes de rodar o setup, tenha em mãos:
 
 ```bash
 # 1. Clone o repositório
-git clone https://github.com/uilhamello/vpn-sophos-linux.git
-          
+git clone https://github.com/sua-empresa/vpn-sophos.git
 cd vpn-sophos
 
 # 2. Coloque o arquivo .ovpn na sua home (opcional — pode selecionar na tela)
@@ -68,6 +67,7 @@ Após o setup, conecte e desconecte pela interface gráfica ou pelo terminal:
 |---|---|---|
 | Conectar | **VPN Conectar** | `vpn-on` |
 | Desconectar | **VPN Desconectar** | `vpn-off` |
+| Verificar status | — | `vpn-status` |
 
 ---
 
