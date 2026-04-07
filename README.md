@@ -57,6 +57,14 @@ chmod +x scripts/setup-vpn.sh
 
 O instalador abrirá uma interface gráfica pedindo as informações passo a passo.
 
+Informações solicitadas:
+1 - Senha SUDO
+2 - Usuário da VPN
+3 - Senha da VPN
+4 - Secret Base32 - [opcional]  Caso queira que o sistema leia o token automaticamente 
+Onde obter o secret base32:
+<img width="1245" height="449" alt="imagem (3)" src="https://github.com/user-attachments/assets/47b6e7ad-91d1-4b88-8377-0c14d20964d5" />
+
 ---
 
 ## Uso
