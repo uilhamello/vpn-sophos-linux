@@ -1,0 +1,175 @@
+#!/bin/bash
+# =============================================================================
+# vpn-sophos-up — sobe a VPN. Executa como ROOT, via sudo NOPASSWD.
+# =============================================================================
+# Modelo de ameaça: assume-se que um processo qualquer da sessão do usuário pode
+# tentar abusar deste comando (ele roda sem senha). Por isso:
+#
+#   - NÃO aceita argumentos. A regra do sudoers também os proíbe ("" no final),
+#     e aqui a checagem é repetida — defesa em profundidade.
+#   - NÃO recebe caminho de config nem de credencial. Tudo é fixo: a config é
+#     root-owned em /etc e as credenciais chegam pelo STDIN. Assim o chamador
+#     não consegue apontar o OpenVPN para um .ovpn adulterado (que executaria
+#     scripts como root) nem fazer o root ler um arquivo arbitrário — como
+#     /etc/shadow — e enviá-lo ao servidor VPN como se fosse senha.
+#   - Verifica a integridade da config antes de usar (dono root, não gravável
+#     por outros, não é symlink).
+#   - Encerra apenas a instância DESTA VPN, identificada pelo pidfile ou pela
+#     linha de comando. Nunca faz `killall openvpn`, que derrubaria a VPN de
+#     outro usuário ou de outro serviço na mesma máquina.
+#   - O OpenVPN sobe endurecido: --script-security 1 (nenhum script externo,
+#     mesmo que a config peça), descarte de privilégio para nobody:nogroup e
+#     --auth-nocache (a senha não fica na memória do processo).
+#   - O arquivo de credencial vive em tmpfs root-only e é apagado antes desta
+#     chamada retornar, em qualquer desfecho.
+#
+# Saída: 0 conectado · 64 uso inválido · 65 credencial inválida
+#        66 config inválida · 69 falha ao subir · 70 timeout · 77 sem privilégio
+# =============================================================================
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+CONFIG=/etc/vpn-sophos/client.ovpn
+RUN_DIR=/run/vpn-sophos
+AUTH="$RUN_DIR/auth"
+PIDFILE="$RUN_DIR/openvpn.pid"
+LOG="$RUN_DIR/openvpn.log"
+IFACE_FILE="$RUN_DIR/iface"
+ESPERA=20
+
+erro() { printf 'vpn-sophos-up: %s\n' "$1" >&2; exit "$2"; }
+
+[ "$#" -eq 0 ]     || erro "não aceita argumentos" 64
+[ "$(id -u)" = 0 ] || erro "precisa rodar como root" 77
+
+# ── Integridade da config ─────────────────────────────────────────────────────
+[ ! -L "$CONFIG" ] || erro "$CONFIG é um symlink" 66
+[ -f "$CONFIG" ]   || erro "$CONFIG não encontrado — rode o setup" 66
+
+leitura=$(stat -c '%u %a' "$CONFIG")
+dono=${leitura%% *}
+modo=${leitura##* }
+[ "$dono" = 0 ] || erro "$CONFIG não pertence ao root" 66
+(( 0"$modo" & 022 )) && erro "$CONFIG é gravável por não-root" 66 || true
+
+OPENVPN=$(command -v openvpn) || erro "openvpn não instalado" 69
+
+# ── Runtime root-only ─────────────────────────────────────────────────────────
+# Recria o diretório se ele não for exatamente o esperado — versões antigas
+# deixavam /run/vpn-sophos com dono do usuário, o que permitia plantar um
+# symlink no lugar do arquivo de credencial.
+if [ -L "$RUN_DIR" ] || { [ -e "$RUN_DIR" ] && [ ! -d "$RUN_DIR" ]; }; then
+  rm -f "$RUN_DIR"
+fi
+mkdir -p "$RUN_DIR"
+chown root:root "$RUN_DIR"
+chmod 700 "$RUN_DIR"
+rm -f "$AUTH"
+
+limpar() { rm -f "$AUTH"; }
+trap limpar EXIT INT TERM
+
+# ── Credenciais pelo stdin (2 linhas: usuário, senha+OTP) ─────────────────────
+IFS= read -r usuario  || erro "stdin sem a linha de usuário" 65
+IFS= read -r segredo  || erro "stdin sem a linha de senha" 65
+[ -n "$usuario" ] || erro "usuário vazio" 65
+[ -n "$segredo" ] || erro "senha vazia" 65
+case $usuario in *[$'\n\r']*) erro "usuário inválido" 65 ;; esac
+
+printf '%s\n%s\n' "$usuario" "$segredo" > "$AUTH"
+chmod 600 "$AUTH"
+unset segredo
+
+# ── Encerra apenas a instância desta VPN ──────────────────────────────────────
+nossos_pids() {
+  local pid comm
+  if [ -f "$PIDFILE" ]; then
+    pid=$(head -n1 "$PIDFILE" 2>/dev/null || true)
+    if [[ "$pid" =~ ^[0-9]+$ ]] && [ -r "/proc/$pid/comm" ]; then
+      comm=$(cat "/proc/$pid/comm")
+      [ "$comm" = openvpn ] && printf '%s\n' "$pid"
+    fi
+  fi
+  # Fallback: processos openvpn cuja linha de comando aponta para a NOSSA config
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    [ -r "$d/comm" ] || continue
+    [ "$(cat "$d/comm" 2>/dev/null || true)" = openvpn ] || continue
+    if tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -qF -- "$CONFIG"; then
+      printf '%s\n' "$pid"
+    fi
+  done
+}
+
+encerrar_anterior() {
+  local pids
+  pids=$(nossos_pids | sort -u)
+  [ -n "$pids" ] || return 0
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+  for _ in 1 2 3 4 5 6; do
+    sleep 0.5
+    pids=$(nossos_pids | sort -u)
+    [ -n "$pids" ] || return 0
+  done
+  # shellcheck disable=SC2086
+  kill -KILL $pids 2>/dev/null || true
+  sleep 0.5
+}
+
+encerrar_anterior
+rm -f "$PIDFILE" "$IFACE_FILE"
+
+# ── Sobe o OpenVPN endurecido ─────────────────────────────────────────────────
+# --script-security 1 vem DEPOIS de --config: vence qualquer diretiva do arquivo.
+"$OPENVPN" --daemon \
+  --config "$CONFIG" \
+  --auth-user-pass "$AUTH" \
+  --auth-nocache \
+  --script-security 1 \
+  --user nobody \
+  --group nogroup \
+  --persist-tun \
+  --persist-key \
+  --writepid "$PIDFILE" \
+  --log "$LOG" \
+  --verb 3 || erro "openvpn não iniciou (veja vpn-sophos-log)" 69
+
+# ── Espera a interface subir ──────────────────────────────────────────────────
+interface_ativa() {
+  local dev
+  for dev in /sys/class/net/tun*; do
+    [ -e "$dev" ] || continue
+    if [ -n "$(ip -4 -o addr show "${dev##*/}" 2>/dev/null)" ]; then
+      printf '%s\n' "${dev##*/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+processo_vivo() {
+  local pid
+  pid=$(head -n1 "$PIDFILE" 2>/dev/null || true)
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ -d "/proc/$pid" ]
+}
+
+for i in $(seq 1 $((ESPERA * 2))); do
+  sleep 0.5
+  if dev=$(interface_ativa); then
+    printf '%s\n' "$dev" > "$IFACE_FILE"
+    chmod 644 "$IFACE_FILE"
+    limpar
+    printf 'conectado: %s\n' "$dev"
+    exit 0
+  fi
+  # Só a partir de ~3s: antes disso a ausência do pidfile é normal — o openvpn
+  # ainda não daemonizou, e concluir "morreu" aqui seria um falso negativo.
+  if [ "$i" -gt 6 ] && ! processo_vivo; then
+    erro "openvpn morreu durante a conexão (veja vpn-sophos-log)" 69
+  fi
+done
+
+encerrar_anterior
+erro "a interface não subiu em ${ESPERA}s (veja vpn-sophos-log)" 70
