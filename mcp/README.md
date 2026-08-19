@@ -25,12 +25,28 @@ carregados na inicialização.
 | Tool | O que faz |
 |---|---|
 | `vpn_status` | interface up/down, IP e PID do openvpn. Não altera nada. |
-| `vpn_connect(espera_segundos=45)` | Idempotente. Roda o `~/vpn-connect.sh` e traduz o código de saída em causa: configuração, keyring, sudo ou rede. |
+| `vpn_connect(espera_segundos=45, codigo_2fa="")` | Idempotente. Roda o `~/vpn-connect.sh` e traduz o código de saída em causa: configuração, keyring/2FA, sudo ou rede. |
 | `vpn_disconnect` | Roda o `~/vpn-disconnect.sh` e confirma o encerramento. |
 | `vpn_logs(linhas=30)` | Última execução dos scripts **e** o fim do log do OpenVPN (via `vpn-sophos-log`), com segredos mascarados. |
 
 Uso típico: pedir "liga a vpn" / "qual o status da vpn?" numa sessão, ou deixar
 o próprio agente ligar sozinho quando um acesso a banco falhar por timeout.
+
+### Modo 2FA manual
+
+No modo automático o `vpn_connect` não pede nada a ninguém. No modo **manual** o
+segundo fator não fica guardado, então alguém precisa informá-lo:
+
+- **com `codigo_2fa`** (6 a 8 dígitos): o código é injetado no script pela variável
+  `VPN_OTP`, que o script consome e descarta — nenhuma janela é aberta, e funciona
+  até em sessão sem interface gráfica;
+- **sem `codigo_2fa`**: o script abre uma janela pedindo o código e espera (90s).
+  Só serve se o usuário estiver na frente da tela; passado o tempo, o servidor
+  encerra o **grupo** de processos, então a janela não fica órfã.
+
+O `codigo_2fa` também resolve o modo automático com o keyring travado. O código é
+de uso único e expira em ~30s; enquanto o processo vive, ele fica visível em
+`/proc/<pid>/environ` para processos do mesmo usuário.
 
 ## Por que este MCP existe
 

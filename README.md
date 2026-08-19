@@ -138,8 +138,10 @@ esses arquivos.
 > **Trade-off do modo TOTP automático:** guardar o secret TOTP (mesmo no keyring,
 > que destrava no login) coloca o segundo fator ao alcance de processos da sua
 > sessão logada. Se você quer 2FA "puro" — o código existindo só no momento em
-> que você o digita — escolha **Manual** no setup. O preço é que nenhuma
-> automação consegue conectar sozinha.
+> que você o digita — escolha **Manual** no setup. O preço é que cada conexão
+> exige uma pessoa: respondendo à janela do 2FA, ou ditando o código para quem
+> chama (a variável `VPN_OTP` aceita um código vindo de fora e dispensa a
+> janela). Nada conecta sozinho.
 
 ---
 
@@ -197,8 +199,9 @@ a VPN precisa subir sozinha:
 mcp/install.sh
 ```
 
-Detalhes em [`mcp/README.md`](mcp/README.md). Funciona apenas no modo TOTP
-automático (no modo manual, alguém precisa digitar o código).
+Detalhes em [`mcp/README.md`](mcp/README.md). No modo TOTP automático a conexão
+sobe sem interação; no modo manual, quem chama informa o código 2FA na hora
+(parâmetro `codigo_2fa`) ou responde à janela que o script abre.
 
 ---
 

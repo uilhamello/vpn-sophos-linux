@@ -125,7 +125,10 @@ deles é fechado por construção:
   você precisar resolver nomes internos, use IP ou configure o DNS à mão.
 - **Modo TOTP automático guarda o segundo fator.** Ele fica no keyring, que
   destrava no seu login — portanto ao alcance de processos da sua sessão. O modo
-  manual elimina isso, ao custo de não permitir automação.
+  manual elimina isso: o código só existe no momento em que você o digita. Em
+  troca, cada conexão exige alguém — respondendo a janela do 2FA ou informando o
+  código a quem chama (a variável `VPN_OTP`, que o script consome e descarta,
+  aceita um código vindo de fora e dispensa a janela).
 - **Uma VPN por vez.** O encerramento é cirúrgico (só a instância desta config),
   mas subir a VPN encerra a anterior desta mesma config.
 

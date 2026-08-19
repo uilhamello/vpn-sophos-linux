@@ -344,12 +344,24 @@ gerar_scripts() {
   if [ "$TOTP_MODE" = "auto" ]; then
     # O segredo vai do keyring direto para o stdin do gerador: não passa por
     # variável de ambiente nem por argv (legível em /proc por outros usuários).
-    OTP_BLOCK="OTP=\$(secret-tool lookup service vpn-sophos key totp | python3 '$APP_DIR/vpn-sophos-otp')
+    OTP_BLOCK="# Um código informado de fora (VPN_OTP) tem precedência: serve quando o
+# keyring está travado ou quando quem chama já tem o código em mão.
+OTP=\"\${VPN_OTP:-}\"
+unset VPN_OTP
+if [ -z \"\$OTP\" ]; then
+  OTP=\$(secret-tool lookup service vpn-sophos key totp | python3 '$APP_DIR/vpn-sophos-otp')
+fi
 if [ -z \"\${OTP:-}\" ]; then
-  encerrar 3 'Não foi possível gerar o código OTP. Destrave o keyring ou rode o setup novamente.'
+  encerrar 3 'Não foi possível gerar o código OTP. Destrave o keyring, informe o código ou rode o setup novamente.'
 fi"
   else
-    OTP_BLOCK='OTP=$(zenity --entry --title="VPN — código 2FA" --text="Digite o código OTP do Sophos:" --width=320 || true)
+    OTP_BLOCK='# Com VPN_OTP definido não abre janela — permite conectar sem interface
+# gráfica (sessão remota, automação que pede o código a quem está no teclado).
+OTP="${VPN_OTP:-}"
+unset VPN_OTP
+if [ -z "$OTP" ]; then
+  OTP=$(zenity --entry --title="VPN — código 2FA" --text="Digite o código OTP do Sophos:" --width=320 || true)
+fi
 if [ -z "${OTP:-}" ]; then
   encerrar 3 "Código OTP não informado."
 fi'

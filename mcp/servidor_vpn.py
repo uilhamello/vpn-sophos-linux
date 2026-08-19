@@ -25,7 +25,9 @@ senha). Ainda assim, todo texto devolvido passa por um mascarador.
 
 import os
 import json
+import re
 import shlex
+import signal
 import subprocess
 import time
 
@@ -121,7 +123,30 @@ def _pids_openvpn():
     return [int(p) for p in out.split()] if rc == 0 else []
 
 
-def _executar_script(script, timeout):
+def _matar_grupo(proc):
+    """Encerra o processo e tudo o que ele abriu.
+
+    Necessário porque o script pode ter aberto uma janela do zenity (pedido do
+    código 2FA no modo manual): ela é NETA deste processo e sobreviveria a um
+    kill dirigido só ao filho, ficando órfã na tela do usuário.
+    """
+    try:
+        grupo = os.getpgid(proc.pid)
+    except OSError:
+        return
+    for sinal in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(grupo, sinal)
+        except OSError:
+            return
+        try:
+            proc.wait(timeout=3)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _executar_script(script, timeout, extra_env=None):
     """Roda um dos scripts da VPN e devolve (codigo, saida).
 
     O shell descartável no meio protege este servidor do `kill` de processo pai
@@ -129,26 +154,57 @@ def _executar_script(script, timeout):
     `codigo=$?` preserva o código de saída real (ver o cabeçalho do módulo).
     """
     os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
+
+    ambiente = dict(os.environ)
+    if extra_env:
+        ambiente.update(extra_env)
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["bash", "-c", 'bash "$1"; codigo=$?; exit $codigo', "--", script],
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout,
             start_new_session=True,
+            env=ambiente,
         )
-    except subprocess.TimeoutExpired:
-        return 124, "o script não terminou em %ds" % timeout
+    except OSError as exc:
+        return 1, "não foi possível executar %s: %s" % (script, exc)
 
-    saida = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    try:
+        saida = proc.communicate(timeout=timeout)[0] or ""
+        codigo = proc.returncode
+    except subprocess.TimeoutExpired:
+        _matar_grupo(proc)
+        try:
+            saida = proc.communicate(timeout=3)[0] or ""
+        except subprocess.TimeoutExpired:
+            saida = ""
+        codigo = 124
+
+    saida = saida.strip()
     try:
         with open(LOG_FILE, "w", encoding="utf-8") as log:
             os.chmod(LOG_FILE, 0o600)
-            log.write("$ %s\n(codigo %s)\n%s\n" % (script, proc.returncode, saida))
+            log.write("$ %s\n(codigo %s)\n%s\n" % (script, codigo, saida))
     except OSError:
         pass
-    return proc.returncode, saida
+    return codigo, saida
+
+
+def _modo_totp():
+    """'auto', 'manual' ou None — lido do config (dado não sensível)."""
+    return _credenciais().get("TOTP_MODE") or None
+
+
+def _script_aceita_otp():
+    """O ~/vpn-connect.sh instalado sabe usar um código vindo de fora?"""
+    try:
+        with open(SCRIPT_CONNECT, "r", encoding="utf-8", errors="replace") as fh:
+            return "VPN_OTP" in fh.read()
+    except OSError:
+        return False
 
 
 MENSAGENS = {
@@ -179,12 +235,20 @@ def vpn_status() -> str:
 
 
 @mcp.tool()
-def vpn_connect(espera_segundos: int = 45) -> str:
+def vpn_connect(espera_segundos: int = 45, codigo_2fa: str = "") -> str:
     """Liga a VPN de trabalho e espera o túnel subir.
 
     Idempotente: se já estiver conectada, não faz nada. No modo TOTP automático
-    não pede nada a ninguém — o script busca a senha no keyring e gera o código
-    2FA. Quando falha, devolve a causa (configuração, keyring, sudo ou rede)."""
+    não pede nada a ninguém — o script busca a senha no keyring e gera o código.
+
+    No modo MANUAL o código 2FA não fica guardado em lugar nenhum, então alguém
+    precisa informá-lo: passe `codigo_2fa` com o código que o usuário ditou (6 a
+    8 dígitos) e nenhuma janela é aberta. Sem ele, o script abre uma janela
+    pedindo o código e fica esperando — o que só funciona se o usuário estiver na
+    frente da tela.
+
+    `codigo_2fa` também serve no modo automático, quando o keyring está travado.
+    Quando falha, devolve a causa (configuração, keyring/2FA, sudo ou rede)."""
     ip = _ip_tun()
     if ip:
         return f"Já estava conectada — {IFACE} {ip}. Nada a fazer."
@@ -194,8 +258,28 @@ def vpn_connect(espera_segundos: int = 45) -> str:
     if not os.path.isfile(CONFIG_FILE):
         return f"Erro: configuração ausente em {CONFIG_FILE}. Rode o setup novamente."
 
+    modo = _modo_totp()
+    extra_env = None
+    codigo_2fa = (codigo_2fa or "").strip().replace(" ", "")
+
+    if codigo_2fa:
+        if not re.fullmatch(r"[0-9]{6,8}", codigo_2fa):
+            return "Erro: o código 2FA deve ter de 6 a 8 dígitos numéricos."
+        if not _script_aceita_otp():
+            return (
+                f"Erro: o {SCRIPT_CONNECT} instalado é anterior a esta melhoria e "
+                "ignoraria o código informado (abriria uma janela em vez disso). "
+                "Rode o scripts/setup-vpn.sh novamente para regerá-lo."
+            )
+        extra_env = {"VPN_OTP": codigo_2fa}
+
     espera = max(10, min(int(espera_segundos), 180))
-    codigo, saida = _executar_script(SCRIPT_CONNECT, espera)
+    # Sem código em mãos e no modo manual, o script vai esperar alguém digitar na
+    # janela: dá tempo real para isso em vez de matar a janela em 45s.
+    if modo == "manual" and not codigo_2fa:
+        espera = max(espera, 90)
+
+    codigo, saida = _executar_script(SCRIPT_CONNECT, espera, extra_env)
     saida = _mascarar(saida)
 
     if codigo == 0:
@@ -204,11 +288,16 @@ def vpn_connect(espera_segundos: int = 45) -> str:
             return f"Conectada — {IFACE} {ip}. Banco acessível."
         return f"O script concluiu sem erro, mas não vejo IPv4 em {IFACE}: {saida}"
 
-    return (
-        f"Falhou: {MENSAGENS.get(codigo, f'código {codigo}')}."
-        + (f"\n{saida}" if saida else "")
-        + "\nPara o log do OpenVPN: vpn_logs."
-    )
+    if modo == "manual" and codigo == 3:
+        motivo = ("modo 2FA manual — o código não foi informado. Peça o código ao "
+                  "usuário e chame de novo com codigo_2fa")
+    elif modo == "manual" and codigo == 124:
+        motivo = (f"modo 2FA manual — a janela do código não foi respondida em {espera}s. "
+                  "Peça o código ao usuário e chame de novo com codigo_2fa")
+    else:
+        motivo = MENSAGENS.get(codigo, f"código {codigo}")
+
+    return f"Falhou: {motivo}." + (f"\n{saida}" if saida else "") + "\nPara o log do OpenVPN: vpn_logs."
 
 
 @mcp.tool()
