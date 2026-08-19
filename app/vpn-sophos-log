@@ -1,0 +1,30 @@
+#!/bin/bash
+# =============================================================================
+# vpn-sophos-log — mostra o fim do log do OpenVPN. Roda como ROOT via sudo.
+# =============================================================================
+# O log fica em tmpfs root-only (/run/vpn-sophos), porque o diretório de runtime
+# precisa ser inacessível ao usuário — é lá que a credencial transita. Este
+# wrapper existe para devolver o diagnóstico sem abrir o diretório: caminho fixo,
+# número de linhas fixo, nenhum argumento aceito.
+#
+# O OpenVPN não registra senha nem o código OTP no log; mesmo assim a saída passa
+# por um filtro que remove linhas de credencial, caso uma versão futura mude isso.
+#
+# Saída: 0 ok · 64 uso inválido · 66 sem log · 77 sem privilégio
+# =============================================================================
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+LOG=/run/vpn-sophos/openvpn.log
+LINHAS=60
+
+erro() { printf 'vpn-sophos-log: %s\n' "$1" >&2; exit "$2"; }
+
+[ "$#" -eq 0 ]     || erro "não aceita argumentos" 64
+[ "$(id -u)" = 0 ] || erro "precisa rodar como root" 77
+[ ! -L "$LOG" ]    || erro "$LOG é um symlink" 66
+[ -f "$LOG" ]      || erro "sem log ainda (a VPN nunca subiu nesta sessão)" 66
+
+# AUTH_FAILED é mantido de propósito: é o sinal de "senha ou OTP errado", o
+# diagnóstico mais útil do log.
+tail -n "$LINHAS" "$LOG" | grep -v -i -E 'password' || true

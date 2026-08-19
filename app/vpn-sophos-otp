@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+# =============================================================================
+# vpn-sophos-otp — gera o código TOTP lendo o segredo do STDIN.
+# =============================================================================
+# Roda SEM privilégio, como o usuário.
+#
+# Por que não usar o oathtool: ele recebe o segredo como argumento de linha de
+# comando, e `argv` é legível por qualquer usuário da máquina em /proc. O segundo
+# fator ficaria exposto durante cada conexão. Aqui o segredo entra pelo stdin,
+# usado uma vez e descartado — nunca aparece em `ps`, em log ou em disco.
+#
+# TOTP conforme a RFC 6238: HMAC-SHA1, janela de 30s, 6 dígitos.
+#
+# Uso:  secret-tool lookup service vpn-sophos key totp | vpn-sophos-otp
+# Saída: 0 código impresso · 1 segredo inválido ou ausente
+# =============================================================================
+import base64
+import hashlib
+import hmac
+import struct
+import sys
+import time
+
+JANELA = 30
+DIGITOS = 6
+
+
+def gerar(segredo_base32, agora=None):
+    limpo = segredo_base32.strip().replace(" ", "").replace("-", "").upper()
+    if not limpo:
+        raise ValueError("segredo vazio")
+    preenchimento = "=" * (-len(limpo) % 8)
+    chave = base64.b32decode(limpo + preenchimento, casefold=True)
+    contador = int(agora if agora is not None else time.time()) // JANELA
+    digest = hmac.new(chave, struct.pack(">Q", contador), hashlib.sha1).digest()
+    deslocamento = digest[-1] & 0x0F
+    trecho = struct.unpack(">I", digest[deslocamento:deslocamento + 4])[0]
+    return "%0*d" % (DIGITOS, (trecho & 0x7FFFFFFF) % (10 ** DIGITOS))
+
+
+def main():
+    try:
+        segredo = sys.stdin.readline()
+    except OSError as exc:
+        print("vpn-sophos-otp: falha ao ler o stdin: %s" % exc, file=sys.stderr)
+        return 1
+
+    try:
+        print(gerar(segredo))
+    except (ValueError, TypeError, base64.binascii.Error) as exc:
+        print("vpn-sophos-otp: segredo TOTP inválido (%s)" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

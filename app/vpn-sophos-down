@@ -1,0 +1,77 @@
+#!/bin/bash
+# =============================================================================
+# vpn-sophos-down — encerra a VPN. Executa como ROOT, via sudo NOPASSWD.
+# =============================================================================
+# Não aceita argumentos (a regra do sudoers também os proíbe) e encerra APENAS a
+# instância desta VPN, identificada pelo pidfile ou pela linha de comando que
+# aponta para /etc/vpn-sophos/client.ovpn. Um `killall openvpn` derrubaria a VPN
+# de outro usuário ou de outro serviço da mesma máquina.
+#
+# Saída: 0 encerrado (ou já estava fora) · 64 uso inválido · 69 não encerrou
+#        77 sem privilégio
+# =============================================================================
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG=/etc/vpn-sophos/client.ovpn
+RUN_DIR=/run/vpn-sophos
+PIDFILE="$RUN_DIR/openvpn.pid"
+AUTH="$RUN_DIR/auth"
+IFACE_FILE="$RUN_DIR/iface"
+
+erro() { printf 'vpn-sophos-down: %s\n' "$1" >&2; exit "$2"; }
+
+[ "$#" -eq 0 ]     || erro "não aceita argumentos" 64
+[ "$(id -u)" = 0 ] || erro "precisa rodar como root" 77
+
+nossos_pids() {
+  local pid comm d
+  if [ -f "$PIDFILE" ]; then
+    pid=$(head -n1 "$PIDFILE" 2>/dev/null || true)
+    if [[ "$pid" =~ ^[0-9]+$ ]] && [ -r "/proc/$pid/comm" ]; then
+      comm=$(cat "/proc/$pid/comm")
+      [ "$comm" = openvpn ] && printf '%s\n' "$pid"
+    fi
+  fi
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    [ -r "$d/comm" ] || continue
+    [ "$(cat "$d/comm" 2>/dev/null || true)" = openvpn ] || continue
+    if tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -qF -- "$CONFIG"; then
+      printf '%s\n' "$pid"
+    fi
+  done
+}
+
+pids=$(nossos_pids | sort -u)
+
+if [ -z "$pids" ]; then
+  rm -f "$AUTH" "$PIDFILE" "$IFACE_FILE"
+  echo "já estava desconectada"
+  exit 0
+fi
+
+# shellcheck disable=SC2086
+kill -TERM $pids 2>/dev/null || true
+
+for _ in 1 2 3 4 5 6 7 8; do
+  sleep 0.5
+  pids=$(nossos_pids | sort -u)
+  if [ -z "$pids" ]; then
+    rm -f "$AUTH" "$PIDFILE" "$IFACE_FILE"
+    echo "desconectada"
+    exit 0
+  fi
+done
+
+# shellcheck disable=SC2086
+kill -KILL $pids 2>/dev/null || true
+sleep 1
+
+if [ -z "$(nossos_pids | sort -u)" ]; then
+  rm -f "$AUTH" "$PIDFILE" "$IFACE_FILE"
+  echo "desconectada (forçado)"
+  exit 0
+fi
+
+erro "não foi possível encerrar o openvpn" 69
